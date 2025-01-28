@@ -1,0 +1,77 @@
+# Stage 1: Intermediate Build Stage
+FROM node:18-buster-slim as intermediate
+
+# Define build arguments
+ARG SSH_PUBLIC_KEY
+ARG SSH_PRIVATE_KEY
+
+ENV NODE_ENV=production \
+  PROJECT_HOME=/usr/app \
+  BUILD_DEPS="git python openssh-server build-essential ca-certificates"
+
+# Create project home
+RUN mkdir -p ${PROJECT_HOME}
+
+# Switch to project home directory
+WORKDIR $PROJECT_HOME/
+
+# Configure SSH
+ RUN mkdir -p /root/.ssh \
+   && touch /root/.ssh/id_rsa \
+    && touch /root/.ssh/id_rsa.pub
+
+COPY ssh/config /root/.ssh/config
+
+# Copy SSH keys and fix their permissions
+RUN echo "$SSH_PRIVATE_KEY" >> /root/.ssh/id_rsa \
+  && echo "$SSH_PUBLIC_KEY" >> /root/.ssh/id_rsa.pub \
+  && chmod 600 /root/.ssh/id_rsa \
+  && chmod 600 /root/.ssh/config
+
+# Install build dependencies
+RUN apt-get update \
+  && apt-get install -y -qq --no-install-recommends ${BUILD_DEPS} \
+  && rm -rf /var/lib/apt/lists/*
+
+# Enable and prepare Yarn 4.4.1 with Corepack
+RUN corepack enable \
+  && corepack prepare yarn@4.4.1 --activate
+
+# Copy and install dependencies
+COPY package.json yarn.lock .yarnrc.yml  ${PROJECT_HOME}/
+RUN yarn set version stable && yarn install
+
+# Copy source code
+COPY . ${PROJECT_HOME}/
+
+RUN mkdir dist
+
+COPY dist/index.d.ts ${PROJECT_HOME}/dist/index.d.ts
+
+# Build Storybook with increased memory limit
+RUN NODE_OPTIONS=--max-old-space-size=4096 yarn run build-storybook
+
+# ---------------------------------------------- 2nd stage for the actual image ------------------------------
+FROM docker.chatteron.io/nginx/base:0.20
+
+ENV NODE_ENV=production \
+  PROJECT_HOME=/usr/app
+
+# Switch to project home directory
+WORKDIR $PROJECT_HOME
+
+# Clear the default Nginx configurations
+RUN rm /etc/nginx/conf.d/* \
+  && mkdir -p ${PROJECT_HOME}/storybook-static/
+
+# Copy Nginx configuration file
+COPY --chown=nginx:nginx nginx.conf /etc/nginx/conf.d/
+
+# Copy build output from intermediate stage
+COPY --chown=nginx:nginx --from=intermediate $PROJECT_HOME/storybook-static $PROJECT_HOME/storybook-static
+
+# Expose the necessary port
+EXPOSE 8080
+
+# Run Nginx in the foreground
+CMD ["nginx", "-g", "daemon off;"]

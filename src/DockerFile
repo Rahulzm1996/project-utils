@@ -1,0 +1,76 @@
+FROM node:21-slim as intermediate
+#FROM oven/bun:1.1.26-slim as intermediate
+# define build arguments
+ARG SSH_PUBLIC_KEY
+ARG SSH PRIVATE_KEY
+
+ENV NODE_ENV=production \
+NODE_OPTIONS---max-old-space-size=8192 \
+PROJECT_HOME=/usr/app\
+BUILD_DEPS="git python3 openssh-server build-essential ca-certificates unzip"
+
+# create project home
+RUN mkdir -p ${PROJECT_HOME}/dist
+
+#switch to project home directory
+WORKDIR $PROJECT_HOME/
+
+# configure SSH
+RUN mkdir -p /root/.ssh \
+&& touch /root/.ssh/id_rsa \
+&& touch /root/.ssh/id_rsa.pub
+
+COPY ssh/config /root/.ssh/config
+
+#copy SSH keys
+RUN echo "$SSH_PRIVATE_KEY" >> /root/.ssh/id_rsa \
+&& echo "$SSH_PUBLIC_KEY" >> /root/.ssh/id_rsa.pub
+
+# fix the permissions for SSH private key
+RUN chmod 600 /root/.ssh/id_rsa \
+&& chmod 600 /root/.ssh/config
+
+# install build dependencies
+RUN apt-get update > /dev/null \
+ && apt-get install -y -qq --no-install-recommends ${BUILD_DEPS} > /dev/null \
+ && rm -rf /var/lib/apt/lists/*
+
+# copy package.json file only
+COPY package.json yarn.lock .yarnrc.yml ${PROJECT_HOME}/
+# COPY package.json yarn. lock yarnrc.yml bun.lockb ${PROJECT HOME}/
+
+# install node_modules
+RUN --mount-type=cache, target=/root/.yarn YARN_CACHE_FOLDER=/root/.yarn yarn set version stable && yarn install 
+#RUN bun install
+
+#copy source code
+COPY . ${PROJECT_HOME}/
+
+# build soruce code
+RUN yarn build
+# RUN bun run build
+
+#-------------------------- 2nd stage for the actual image ------------------
+FROM docker.chatteron.io/nginx/base:0.20
+
+ENV NODE_ENV=production \
+PROJECT_HOME=/usr/app
+
+# switch to project home directory
+WORKDIR $PROJECT_HOME
+
+# clear the available sites
+RUN mkdir -p ${PROJECT_HOME}/dist/
+
+#copy nginx file
+COPY --chown=nginx:nginx nginx:config /etc/nginx/conf.d/
+
+#copy required file from the intermediate stage
+COPY --chown=nginx:nginx --from=intermediate ${PROJECT_HOME}/dist $PROJECT_HOME/dist
+
+#check if everthing is alright
+RUN nginx -t
+
+EXPOSE 8080
+
+CMD ["nginx","-g", "daemon off;"]
